@@ -2,6 +2,38 @@ from langchain_core.tools import tool
 import math
 import datetime
 import requests
+import urllib.parse
+import certifi
+
+# Explicit SSL + timeout defaults for all outgoing requests
+_SSL  = certifi.where()
+_TIMEOUT = 10
+_HEADERS = {"User-Agent": "PersonalAIAssistant/1.0 (educational project)"}
+
+
+def make_search_document_tool(retriever):
+    """
+    Factory — creates a search_document tool bound to the current retriever.
+    Called every time the user uploads a new document.
+    """
+    @tool
+    def search_document(query: str) -> str:
+        """
+        Searches the uploaded document for information relevant to the query.
+        Use this whenever the user asks about content from their document.
+        """
+        if retriever is None:
+            return "No document has been uploaded yet."
+        docs = retriever.invoke(query)
+        if not docs:
+            return "No relevant content found in the document for that query."
+        parts = []
+        for i, doc in enumerate(docs):
+            page = doc.metadata.get("page", "?")
+            parts.append(f"[Chunk {i+1} | page {page}]\n{doc.page_content}")
+        return "\n\n---\n\n".join(parts)
+
+    return search_document
 
 
 @tool
@@ -109,7 +141,7 @@ def get_weather(city: str) -> str:
     """
     try:
         url = f"https://wttr.in/{city}?format=j1"
-        res = requests.get(url, timeout=5).json()
+        res = requests.get(url, timeout=_TIMEOUT, verify=_SSL, headers=_HEADERS).json()
         current = res['current_condition'][0]
         temp = current['temp_C']
         feels = current['FeelsLikeC']
@@ -135,7 +167,7 @@ def get_crypto_price(coin: str) -> str:
     try:
         url = "https://api.coingecko.com/api/v3/simple/price"
         params = {"ids": coin.lower(), "vs_currencies": "usd", "include_24hr_change": "true"}
-        res = requests.get(url, params=params, timeout=5).json()
+        res = requests.get(url, params=params, timeout=_TIMEOUT, verify=_SSL, headers=_HEADERS).json()
         data = res[coin.lower()]
         price = data['usd']
         change = round(data['usd_24h_change'], 2)
@@ -154,18 +186,37 @@ def search_wikipedia(query: str) -> str:
     """
     Searches Wikipedia and returns a short summary on any topic.
     Use when the user asks about a concept, person, place, or event.
-    Example: 'Albert Einstein' or 'Machine Learning'
+    Example: 'Albert Einstein', 'Machine Learning', 'Prime Minister of Israel'
+    Always write the query in English for best results.
     """
     try:
-        url = "https://en.wikipedia.org/api/rest_v1/page/summary/" + query.replace(" ", "_")
-        res = requests.get(url, timeout=5).json()
-        title = res.get('title', query)
-        extract = res.get('extract', 'No summary found.')
-        sentences = extract.split('. ')[:3]
-        summary = '. '.join(sentences)
+        # Step 1: search for the best matching page title
+        search_url = "https://en.wikipedia.org/w/api.php"
+        search_params = {
+            "action": "query",
+            "list": "search",
+            "srsearch": query,
+            "format": "json",
+            "srlimit": 1,
+        }
+        search_res = requests.get(search_url, params=search_params, headers=_HEADERS, timeout=_TIMEOUT, verify=_SSL).json()
+        results = search_res.get("query", {}).get("search", [])
+        if not results:
+            return f"No Wikipedia results found for: {query}"
+
+        best_title = results[0]["title"]
+
+        # Step 2: fetch summary for that title
+        encoded_title = urllib.parse.quote(best_title.replace(" ", "_"), safe="")
+        summary_url = f"https://en.wikipedia.org/api/rest_v1/page/summary/{encoded_title}"
+        res = requests.get(summary_url, headers=_HEADERS, timeout=_TIMEOUT, verify=_SSL).json()
+        title = res.get("title", best_title)
+        extract = res.get("extract", "No summary found.")
+        sentences = extract.split(". ")[:3]
+        summary = ". ".join(sentences)
         return f"Wikipedia — {title}:\n{summary}"
     except Exception as e:
-        return f"Could not search Wikipedia for {query}: {str(e)}"
+        return f"Could not search Wikipedia for '{query}': {str(e)}"
 
 
 @tool
@@ -178,7 +229,7 @@ def get_exchange_rate(pair: str) -> str:
         parts = pair.upper().split(',')
         from_cur, to_cur = parts[0].strip(), parts[1].strip()
         url = f"https://open.er-api.com/v6/latest/{from_cur}"
-        res = requests.get(url, timeout=5).json()
+        res = requests.get(url, timeout=_TIMEOUT, verify=_SSL, headers=_HEADERS).json()
         rate = res['rates'][to_cur]
         return f"1 {from_cur} = {round(rate, 4)} {to_cur}"
     except Exception as e:
